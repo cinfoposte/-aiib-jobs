@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """
-AIIB Job Scraper - Extracts current job vacancies from AIIB website and saves as RSS feed
+AIIB Job Scraper
+Scrapes job listings from AIIB website and generates an RSS feed
+Format: cinfoPoste-compatible (based on World Bank reference implementation)
 """
+
+import time
+import os
+import shutil
+import hashlib
+import html as html_module
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+from datetime import datetime, timezone
+from email.utils import format_datetime
+
+import requests
+from bs4 import BeautifulSoup
 
 try:
     from selenium import webdriver
@@ -10,310 +25,295 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-    from webdriver_manager.chrome import ChromeDriverManager
     USE_SELENIUM = True
 except ImportError:
     USE_SELENIUM = False
     print("Warning: Selenium not installed. JavaScript rendering not available.")
-    print("Install with: py -m pip install selenium webdriver-manager")
-
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
-import re
-import time
 
 
-def fetch_jobs():
-    """Fetch job listings from AIIB website"""
-    url = "https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html"
+# ── Constants ────────────────────────────────────────────────────────────────
 
+AIIB_URL = "https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html"
+FEED_FILE = "aiib_jobs.xml"
+FEED_SELF_URL = "https://cinfoposte.github.io/aiib-jobs/aiib_jobs.xml"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def generate_numeric_id(url: str) -> str:
+    """Generate a stable 16-digit numeric GUID from a URL (MD5-based)."""
+    hex_dig = hashlib.md5(url.encode()).hexdigest()
+    return str(int(hex_dig[:16], 16) % 10_000_000_000_000_000)
+
+
+def rfc2822_now() -> str:
+    """Return current UTC time in RFC 2822 format (includes weekday)."""
+    return format_datetime(datetime.now(timezone.utc))
+
+
+def get_existing_links(feed_file: str = FEED_FILE) -> set:
+    """Read job links already present in the existing feed to skip duplicates."""
+    existing = set()
+    if not os.path.exists(feed_file):
+        print("No existing feed found – all jobs treated as new.")
+        return existing
+    try:
+        tree = ET.parse(feed_file)
+        for link_elem in tree.getroot().findall(".//item/link"):
+            if link_elem.text:
+                existing.add(link_elem.text.strip())
+        print(f"Found {len(existing)} existing job(s) in previous feed.")
+    except Exception as e:
+        print(f"Could not read existing feed: {e} – treating all jobs as new.")
+    return existing
+
+
+# ── Selenium driver ───────────────────────────────────────────────────────────
+
+def setup_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    chromedriver_path = shutil.which("chromedriver")
+    service = Service(chromedriver_path) if chromedriver_path else Service("chromedriver")
+    return webdriver.Chrome(service=service, options=chrome_options)
+
+
+# ── Fetch page ────────────────────────────────────────────────────────────────
+
+def fetch_page() -> str | None:
     if USE_SELENIUM:
-        print("Using Selenium with Chrome to render JavaScript...")
+        print("Using Selenium to render JavaScript …")
         driver = None
         try:
-            # Setup Chrome options
-            chrome_options = Options()
-            chrome_options.add_argument('--headless')  # Run in background
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-
-            # Initialize driver
-            print("Initializing Chrome driver...")
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-
-            # Load page
-            print(f"Loading page: {url}")
-            driver.get(url)
-
-            # Wait for the job table to load
-            print("Waiting for content to load...")
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "table-body"))
-                )
-                time.sleep(3)  # Additional wait for dynamic content
-            except:
-                print("Timeout waiting for table-body, continuing anyway...")
-
-            # Get the page source after JavaScript execution
-            html_content = driver.page_source
-            return html_content
-
+            driver = setup_driver()
+            driver.get(AIIB_URL)
+            print("Waiting 20 s for JavaScript rendering …")
+            time.sleep(20)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
+            return driver.page_source
         except Exception as e:
-            print(f"Error with Selenium: {e}")
-            print("Falling back to regular requests...")
+            print(f"Selenium error: {e} – falling back to requests.")
         finally:
             if driver:
                 driver.quit()
 
-    # Fallback to regular requests
-    print("Using regular requests (JavaScript will NOT be rendered)...")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
+    print("Using requests (JavaScript will NOT be rendered) …")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.text
+        r = requests.get(AIIB_URL, headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        print(f"Error fetching URL: {e}")
+        print(f"requests error: {e}")
         return None
 
 
-def parse_jobs(html_content):
-    """Parse HTML content and extract job information"""
-    soup = BeautifulSoup(html_content, 'html.parser')
+# ── Parse jobs ────────────────────────────────────────────────────────────────
+
+def parse_jobs(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
     jobs = []
-    seen_links = set()  # Track unique jobs by link
+    seen = set()
 
-    # Debug: Save HTML to file for inspection
-    with open('debug_page.html', 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    print("Saved rendered HTML to debug_page.html for inspection")
-
-    # Strategy 1: Parse the div-based table structure (used by AIIB)
-    # Job rows are in <ul class="table-row ...">
-    job_rows = soup.find_all('ul', class_='table-row')
-    print(f"Found {len(job_rows)} job row(s) in div-based structure")
+    # Strategy 1 – div-based table (current AIIB structure)
+    job_rows = soup.find_all("ul", class_="table-row")
+    print(f"Strategy 1: {len(job_rows)} row(s) found.")
 
     for row in job_rows:
         try:
-            # Extract job title from pCopy1
-            title_div = row.find('div', class_='pCopy1')
+            title_div = row.find("div", class_="pCopy1")
             if not title_div:
                 continue
-
-            job_title = title_div.get_text(strip=True)
-
-            # Extract link
-            link_tag = row.find('a', class_='viewLink')
-            job_link = ""
-            if link_tag and link_tag.get('href'):
-                job_link = link_tag.get('href', '')
-                if job_link and not job_link.startswith('http'):
-                    job_link = f"https://www.aiib.org{job_link}"
-
-            # Skip duplicates based on link
-            if job_link and job_link in seen_links:
+            title = title_div.get_text(strip=True)
+            if not title or len(title) < 5:
                 continue
-            if job_link:
-                seen_links.add(job_link)
 
-            # Extract closing date from cDate
-            closing_date_div = row.find('div', class_='cDate')
-            closing_date = closing_date_div.get_text(strip=True) if closing_date_div else "Not specified"
+            link_tag = row.find("a", class_="viewLink")
+            href = link_tag.get("href", "") if link_tag else ""
+            if href and not href.startswith("http"):
+                href = f"https://www.aiib.org{href}"
+            if not href:
+                href = AIIB_URL
 
-            # Extract posting date (optional)
-            posting_date_div = row.find('div', class_='pDate')
-            posting_date = posting_date_div.get_text(strip=True) if posting_date_div else ""
+            if href in seen:
+                continue
+            seen.add(href)
 
-            if job_title:
-                jobs.append({
-                    'title': job_title,
-                    'link': job_link,
-                    'closing_date': closing_date,
-                    'posting_date': posting_date,
-                    'ref_number': ""
-                })
-                print(f"  -> Found: {job_title} (Closing: {closing_date})")
+            closing = ""
+            c = row.find("div", class_="cDate")
+            if c:
+                closing = c.get_text(strip=True)
+
+            location = "Beijing, China"  # AIIB HQ default
+
+            jobs.append({
+                "title": title,
+                "link": href,
+                "location": location,
+                "closing_date": closing,
+            })
+            print(f"  [OK] {title}")
 
         except Exception as e:
-            print(f"  Error parsing job row: {e}")
+            print(f"  [ERROR] {e}")
             continue
 
-    # Strategy 2: Fallback to traditional HTML table parsing
+    # Strategy 2 – traditional HTML table fallback
     if not jobs:
-        print("\nTrying traditional HTML table parsing...")
-        tables = soup.find_all('table')
-        print(f"Found {len(tables)} HTML table(s)")
-
-        for idx, table in enumerate(tables):
-            headers = table.find_all('th')
-            header_texts = [th.get_text(strip=True).upper() for th in headers]
-
-            if 'POSITION' in header_texts and 'CLOSING DATE' in header_texts:
-                print(f"  -> Table {idx + 1} matches! Parsing rows...")
-                try:
-                    position_idx = header_texts.index('POSITION')
-                    closing_date_idx = header_texts.index('CLOSING DATE')
-                    ref_number_idx = header_texts.index('REF. NUMBER') if 'REF. NUMBER' in header_texts else None
-                except ValueError:
+        print("Strategy 2: trying HTML tables …")
+        for table in soup.find_all("table"):
+            headers = [th.get_text(strip=True).upper() for th in table.find_all("th")]
+            if "POSITION" not in headers:
+                continue
+            pos_idx = headers.index("POSITION")
+            rows = (table.find("tbody") or table).find_all("tr")
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) <= pos_idx:
                     continue
+                a = cells[pos_idx].find("a")
+                if not a:
+                    continue
+                title = a.get_text(strip=True)
+                href = a.get("href", "")
+                if href and not href.startswith("http"):
+                    href = f"https://www.aiib.org{href}"
+                if not href:
+                    href = AIIB_URL
+                if href in seen:
+                    continue
+                seen.add(href)
+                jobs.append({
+                    "title": title,
+                    "link": href,
+                    "location": "Beijing, China",
+                    "closing_date": "",
+                })
+                print(f"  [OK] {title}")
 
-                rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-
-                for row in rows:
-                    cells = row.find_all('td')
-                    if len(cells) <= max(position_idx, closing_date_idx):
-                        continue
-
-                    position_cell = cells[position_idx]
-                    link_tag = position_cell.find('a')
-
-                    if link_tag:
-                        job_title = link_tag.get_text(strip=True)
-                        job_link = link_tag.get('href', '')
-                        if job_link and not job_link.startswith('http'):
-                            job_link = f"https://www.aiib.org{job_link}"
-                    else:
-                        job_title = position_cell.get_text(strip=True)
-                        job_link = ""
-
-                    closing_date = cells[closing_date_idx].get_text(strip=True)
-
-                    ref_number = ""
-                    if ref_number_idx is not None and len(cells) > ref_number_idx:
-                        ref_number = cells[ref_number_idx].get_text(strip=True)
-
-                    if job_title and closing_date:
-                        jobs.append({
-                            'title': job_title,
-                            'link': job_link,
-                            'closing_date': closing_date,
-                            'posting_date': '',
-                            'ref_number': ref_number
-                        })
-                        print(f"     -> Found job: {job_title}")
-
-    if not jobs:
-        print("\nNo jobs found with any parsing strategy.")
-
+    print(f"\nTotal jobs parsed: {len(jobs)}")
     return jobs
 
 
-def create_rss_feed(jobs):
-    """Create RSS feed XML from job data"""
+# ── Build RSS feed ────────────────────────────────────────────────────────────
 
-    # Create RSS root element
-    rss = ET.Element('rss')
-    rss.set('version', '2.0')
-    rss.set('xmlns:atom', 'http://www.w3.org/2005/Atom')
+def generate_rss_feed(jobs: list[dict], output_file: str = FEED_FILE):
+    """Write an RSS 2.0 feed in cinfoPoste-compatible format."""
 
-    # Create channel
-    channel = ET.SubElement(rss, 'channel')
+    rss = ET.Element("rss", version="2.0")
+    rss.set("xmlns:dc", "http://purl.org/dc/elements/1.1/")
+    rss.set("xmlns:atom", "http://www.w3.org/2005/Atom")
+    rss.set("xml:base", "https://www.aiib.org/")
 
-    # Add channel metadata
-    title = ET.SubElement(channel, 'title')
-    title.text = 'AIIB Job Vacancies'
+    channel = ET.SubElement(rss, "channel")
 
-    link = ET.SubElement(channel, 'link')
-    link.text = 'https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html'
+    ET.SubElement(channel, "title").text = "AIIB Job Vacancies"
+    ET.SubElement(channel, "link").text = AIIB_URL
+    ET.SubElement(channel, "description").text = (
+        "Current job opportunities at Asian Infrastructure Investment Bank (AIIB)"
+    )
+    ET.SubElement(channel, "language").text = "en"
 
-    # Add atom:link with rel="self"
-    atom_link = ET.SubElement(channel, '{http://www.w3.org/2005/Atom}link')
-    atom_link.set('href', 'https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html')
-    atom_link.set('rel', 'self')
-    atom_link.set('type', 'application/rss+xml')
+    atom_link = ET.SubElement(channel, "atom:link")
+    atom_link.set("rel", "self")
+    atom_link.set("type", "application/rss+xml")
+    atom_link.set("href", FEED_SELF_URL)
 
-    description = ET.SubElement(channel, 'description')
-    description.text = 'Current job opportunities at Asian Infrastructure Investment Bank (AIIB)'
+    ET.SubElement(channel, "pubDate").text = rfc2822_now()
 
-    language = ET.SubElement(channel, 'language')
-    language.text = 'en'
+    now_str = rfc2822_now()
 
-    last_build_date = ET.SubElement(channel, 'lastBuildDate')
-    last_build_date.text = datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
-
-    # Add job items
     for job in jobs:
-        item = ET.SubElement(channel, 'item')
+        item = ET.SubElement(channel, "item")
 
-        item_title = ET.SubElement(item, 'title')
-        item_title.text = job['title']
+        ET.SubElement(item, "title").text = job["title"]
+        ET.SubElement(item, "link").text = job["link"]
 
-        item_link = ET.SubElement(item, 'link')
-        item_link.text = job['link'] if job['link'] else link.text
+        # Description – plain text; CDATA applied later via minidom
+        desc = f"AIIB has a vacancy for the position of {job['title']}. Location: {job['location']}."
+        if job.get("closing_date"):
+            desc += f" Closing date: {job['closing_date']}."
+        ET.SubElement(item, "description").text = desc
 
-        item_description = ET.SubElement(item, 'description')
-        desc_text = f"Position: {job['title']}"
-        if job['ref_number']:
-            desc_text += f"\nReference Number: {job['ref_number']}"
-        desc_text += f"\nClosing Date: {job['closing_date']}"
-        if job.get('posting_date'):
-            desc_text += f"\nPosting Date: {job['posting_date']}"
-        item_description.text = desc_text
+        # GUID – stable numeric ID derived from URL
+        guid = ET.SubElement(item, "guid")
+        guid.set("isPermaLink", "false")
+        guid.text = generate_numeric_id(job["link"])
 
-        # Add closing date as pubDate (parse if possible)
-        pub_date = ET.SubElement(item, 'pubDate')
-        pub_date.text = datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
+        ET.SubElement(item, "pubDate").text = now_str
 
-        # Add GUID
-        guid = ET.SubElement(item, 'guid')
-        guid.set('isPermaLink', 'true')
-        guid.text = job['link'] if job['link'] else f"{link.text}#{job['title']}"
+        source = ET.SubElement(item, "source")
+        source.set("url", AIIB_URL)
+        source.text = "AIIB Job Vacancies"
 
-    return rss
+    # Pretty-print via minidom and wrap descriptions in CDATA
+    xml_string = ET.tostring(rss, encoding="unicode")
+    dom = minidom.parseString(xml_string)
+
+    for item_node in dom.getElementsByTagName("item"):
+        for desc_node in item_node.getElementsByTagName("description"):
+            raw = desc_node.firstChild.nodeValue if desc_node.firstChild else ""
+            safe = html_module.escape(raw, quote=False)
+            while desc_node.firstChild:
+                desc_node.removeChild(desc_node.firstChild)
+            desc_node.appendChild(dom.createCDATASection(safe))
+
+    pretty = "\n".join(
+        line for line in dom.toprettyxml(indent="  ").split("\n") if line.strip()
+    )
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(pretty)
+
+    print(f"\n[SUCCESS] Feed written: {output_file}  ({len(jobs)} job(s))")
 
 
-def prettify_xml(elem):
-    """Return a pretty-printed XML string"""
-    rough_string = ET.tostring(elem, encoding='utf-8')
-    reparsed = minidom.parseString(rough_string)
-    return reparsed.toprettyxml(indent="  ", encoding='utf-8').decode('utf-8')
-
-
-def save_rss_feed(rss_element, filename='aiib_jobs.xml'):
-    """Save RSS feed to XML file"""
-    xml_string = prettify_xml(rss_element)
-
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(xml_string)
-
-    print(f"RSS feed saved to {filename}")
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Fetching AIIB job vacancies...")
-    html_content = fetch_jobs()
+    print("=" * 60)
+    print("AIIB Job Scraper  (cinfoPoste-compatible)")
+    print("=" * 60)
 
-    if not html_content:
-        print("Failed to fetch job listings")
+    existing_links = get_existing_links()
+
+    html = fetch_page()
+    if not html:
+        print("[ERROR] Could not fetch page.")
         return
 
-    print("Parsing job listings...")
-    jobs = parse_jobs(html_content)
+    all_jobs = parse_jobs(html)
+    new_jobs = [j for j in all_jobs if j["link"] not in existing_links]
 
-    if not jobs:
-        print("No current job openings found")
-        print("Creating empty RSS feed...")
+    print("\n" + "=" * 60)
+    print(f"Total jobs found    : {len(all_jobs)}")
+    print(f"New jobs            : {len(new_jobs)}")
+    print(f"Skipped (duplicate) : {len(all_jobs) - len(new_jobs)}")
+    print("=" * 60)
+
+    if new_jobs:
+        generate_rss_feed(new_jobs)
+        print("\nNew jobs added:")
+        for i, j in enumerate(new_jobs, 1):
+            print(f"  {i}. {j['title']}")
     else:
-        print(f"Found {len(jobs)} job(s)")
-        for job in jobs:
-            print(f"  - {job['title']} (Closing: {job['closing_date']})")
+        print("\n[INFO] No new jobs – feed not updated.")
+        if not os.path.exists(FEED_FILE):
+            print("[INFO] Creating empty feed.")
+            generate_rss_feed([])
 
-    print("\nGenerating RSS feed...")
-    rss_feed = create_rss_feed(jobs)
-
-    save_rss_feed(rss_feed, 'aiib_jobs.xml')
-    print("Done!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
