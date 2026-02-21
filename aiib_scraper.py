@@ -35,7 +35,7 @@ except ImportError:
 
 AIIB_URL = "https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html"
 FEED_FILE = "aiib_jobs.xml"
-FEED_SELF_URL = "https://cinfoposte.github.io/aiib-jobs/aiib_jobs.xml"
+FEED_SELF_URL = "https://cinfoposte.github.io/-aiib-jobs/aiib_jobs.xml"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
