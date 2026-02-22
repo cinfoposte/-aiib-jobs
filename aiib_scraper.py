@@ -215,8 +215,6 @@ def generate_rss_feed(jobs: list[dict], output_file: str = FEED_FILE):
     ET.register_namespace('dc', 'http://purl.org/dc/elements/1.1/')
 
     rss = ET.Element("rss", version="2.0")
-    rss.set("xmlns:dc", "http://purl.org/dc/elements/1.1/")
-    rss.set("xmlns:atom", "http://www.w3.org/2005/Atom")
     rss.set("xml:base", "https://www.aiib.org/")
 
     channel = ET.SubElement(rss, "channel")
@@ -228,7 +226,7 @@ def generate_rss_feed(jobs: list[dict], output_file: str = FEED_FILE):
     )
     ET.SubElement(channel, "language").text = "en"
 
-    atom_link = ET.SubElement(channel, "atom:link")
+    atom_link = ET.SubElement(channel, "{http://www.w3.org/2005/Atom}link")
     atom_link.set("rel", "self")
     atom_link.set("type", "application/rss+xml")
     atom_link.set("href", FEED_SELF_URL)
