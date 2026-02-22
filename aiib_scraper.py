@@ -35,7 +35,7 @@ except ImportError:
 
 AIIB_URL = "https://www.aiib.org/en/opportunities/career/job-vacancies/staff/index.html"
 FEED_FILE = "aiib_jobs.xml"
-FEED_SELF_URL = "https://cinfoposte.github.io/-aiib-jobs/aiib_jobs.xml"
+FEED_SELF_URL = "https://cinfoposte.github.io/aiib-jobs/aiib_jobs.xml"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -210,6 +210,9 @@ def parse_jobs(html: str) -> list[dict]:
 
 def generate_rss_feed(jobs: list[dict], output_file: str = FEED_FILE):
     """Write an RSS 2.0 feed in cinfoPoste-compatible format."""
+
+    ET.register_namespace('atom', 'http://www.w3.org/2005/Atom')
+    ET.register_namespace('dc', 'http://purl.org/dc/elements/1.1/')
 
     rss = ET.Element("rss", version="2.0")
     rss.set("xmlns:dc", "http://purl.org/dc/elements/1.1/")
