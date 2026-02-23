@@ -2,6 +2,8 @@
 
 Ein Python-Skript, das aktuelle Stellenangebote von der AIIB-Website extrahiert und als RSS-Feed im XML-Format speichert.
 
+RSS feed: https://cinfoposte.github.io/-aiib-jobs/aiib_jobs.xml
+
 ## Features
 
 ✓ Extrahiert alle aktuellen Jobausschreibungen von der AIIB-Website
